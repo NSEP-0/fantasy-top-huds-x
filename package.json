@@ -1,0 +1,19 @@
+{
+    "name": "fantasy-top-twitter-bot",
+    "version": "1.0.0",
+    "description": "A Twitter bot that posts hero information from Fantasy Top using the updated SDK.",
+    "main": "bot.mjs",
+    "type": "module",
+    "scripts": {
+      "start": "node bot.mjs"
+    },
+    "dependencies": {
+      "@fantasy-top/sdk-pro": "1.2.4",
+      "dotenv": "^16.0.0",
+      "got": "^11.8.2",
+      "oauth-1.0a": "^2.2.6"
+    },
+    "author": "Your Name",
+    "license": "MIT"
+  }
+  
