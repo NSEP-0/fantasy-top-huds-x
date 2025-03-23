@@ -31,57 +31,109 @@ The first time you run the bot, it will:
 - `fantasyService.mjs` - Fantasy Top API integration for fetching hero data
 - `twitterClient.mjs` - Twitter API integration for posting tweets
 - `auth.mjs` - OAuth authentication handling for Twitter
+- `test.mjs` - Test script to check Fantasy Top market data without posting to Twitter
 
 ## Usage
-To run the bot, simply run:
+To run the bot and post to Twitter, run:
 ```bash
 npm start
 ```
-To run a test of just the fantasyService, run:
+or
 ```bash
-node fantasyService.mjs "rasmr"
+node bot.mjs
 ```
 
-Example Output:
-```json
-Fetching hero info for: rasmr
-rasmr_eth 423164349
-[
-  { rarity: 1, supply: 1 },
-  { rarity: 2, supply: 7 },
-  { rarity: 3, supply: 76 },
-  { rarity: 4, supply: 420 }
-]
-Hero Info:
+### Testing Without Posting to Twitter
+The `test.mjs` script allows you to check Fantasy Top market data without posting to Twitter.
+
+Basic usage:
+```bash
+node test.mjs hero_name
+```
+
+Additional testing options:
+```bash
+# Get help and see all available options
+node test.mjs --help
+
+# Test supply data for a specific hero
+node test.mjs hero_name --supply
+
+# Test detailed price data across all rarity levels
+node test.mjs hero_name --prices
+```
+
+Examples:
+```bash
+node test.mjs rasmr              # Test market info for rasmr
+node test.mjs orangie --supply   # Test supply data for orangie
+node test.mjs TylerDurden --prices  # Test price data for TylerDurden
+node test.mjs vydamo_            # Test market info for vydamo_
+```
+
+Example Twitter Post:
+```
+rasmr_eth
+
+Legendary: 1 cards
+Epic: 8 cards (Last: Ξ1.900, Bid: Ξ1.040)
+Rare: 54 cards (Price: Ξ0.631, Last: Ξ0.470, Bid: Ξ0.382)
+Common: 146 cards (Price: Ξ0.100, Last: Ξ0.096, Bid: Ξ0.088)
+
+Check out more on Fantasy Top!
+```
+
+Example test.mjs output:
+```
+=== RAW HERO DATA ===
 {
-  "name": "rasmr",
-  "supplyDetails": [
-    {
+  "id": "423164349",
+  "name": "rasmr_eth",
+  "profileImage": "https://pbs.twimg.com/profile_images/1831904183001247744/ALdr5oD1_normal.jpg",
+  "followers": "106992",
+  "stars": 7,
+  "marketInfo": {
+    "1": {
       "rarity": 1,
+      "rarityName": "Legendary",
       "supply": 1,
-      "lastSellPrice": "N/A",
-      "floorPrice": "N/A"
+      "highestBid": null,
+      "lastSellPrice": null,
+      "floorPrice": ""
     },
-    {
+    "2": {
       "rarity": 2,
-      "supply": 7,
-      "lastSellPrice": "N/A",
-      "floorPrice": "N/A"
+      "rarityName": "Epic",
+      "supply": 8,
+      "highestBid": "1040000000000000000",
+      "lastSellPrice": "1900000000000000000",
+      "floorPrice": ""
     },
-    {
-      "rarity": 3,
-      "supply": 76,
-      "lastSellPrice": "N/A",
-      "floorPrice": "N/A"
-    },
-    {
-      "rarity": 4,
-      "supply": 420,
-      "lastSellPrice": "N/A",
-      "floorPrice": "0.12"
-    }
-  ]
+    // ... more rarity levels ...
+  }
 }
+
+=== HERO MARKET INFORMATION ===
+Name: rasmr_eth
+ID: 423164349
+Followers: 106992
+Stars: 7
+
+--- Market Data By Rarity ---
+
+Legendary (Rarity Level: 1):
+  Supply: 1
+  Current Price (Lowest Asking Price):
+    Raw: N/A
+    ETH: 0.000000
+  Last Sell Price:
+    Raw: N/A
+    ETH: N/A
+  Highest Bid:
+    Raw: N/A
+    ETH: N/A
+
+// ... more rarity levels ...
 ```
 
 ## Error Handling
@@ -92,10 +144,15 @@ Hero Info:
 
 ## Notes
 
-- The bot currently posts supply details, last sell prices, and floor prices for each rarity level
-- Rate limits apply for both Twitter and Fantasy Top APIs
+- The bot posts hero information including:
+  - Name and supply by rarity level
+  - Floor prices (lowest asking prices) in ETH
+  - Last sell prices in ETH
+  - Current highest bids in ETH
 - Tokens are stored locally in `tokens.json` after initial authorization
+- Wei values (blockchain currency denominations) are automatically converted to ETH for readability
 
 ## Next Steps
-1. Identify fix for invalid supply numbers
-2. Determine if possible to get "last purchase price" by rarity.
+1. Add functionality to automatically schedule tweets
+2. Implement tracking of price changes over time
+3. Add support for multiple heroes in a single run

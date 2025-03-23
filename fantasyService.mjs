@@ -1,176 +1,304 @@
-// fantasyService.mjs
 import dotenv from 'dotenv';
 import { Client, Configuration } from '@fantasy-top/sdk-pro';
-import got from 'got';
 
+// Load environment variables
 dotenv.config();
 
 if (!process.env.FTOP_API_KEY) {
-  console.error('FTOP_API_KEY is not defined in your .env file');
-  process.exit(1);
+  throw new Error('FTOP_API_KEY is not defined. Please check your .env file.');
 }
 
-// Configure the Fantasy Top SDK
+// Configure the Fantasy Top API client
 const config = new Configuration({
   basePath: process.env.API_URL || 'https://api-v2.fantasy.top',
   apiKey: process.env.FTOP_API_KEY,
 });
-const fantasyApi = Client.getInstance(config);
+
+export const fantasyApi = Client.getInstance(config);
 
 /**
- * Calls the marketplace sell-orders endpoint to find the floor price for
- * a specific hero *and* rarity, using heroHandle in the query but filtering
- * by heroId in-memory to avoid collisions.
- *
- * @param {string} heroHandle - The hero's handle or name (e.g., "rasmr").
- * @param {string} heroId - The hero's unique ID from the API (e.g., "423164349").
- * @param {number} rarity - The rarity level (1, 2, 3, or 4).
- * @returns {Promise<string>} The floor price as a string, or "N/A" if none found.
+ * Fetch a hero by handle or name, with enhanced search capabilities.
+ * @param {string} heroName - Hero's handle or name.
+ * @returns {Promise<Object>} - The hero object or null if not found.
  */
-async function getFloorPrice(heroHandle, heroId, rarity) {
-  const url = `${config.basePath}/marketplace/sell-orders?search=${encodeURIComponent(heroHandle)}&rankCriteria=0&pagination[page]=1&pagination[limit]=50`;
-  
+export async function fetchHeroByName(heroName) {
   try {
-    const response = await got(url, {
-      headers: {
-        accept: 'application/json',
-        'x-api-key': process.env.FTOP_API_KEY,
-      },
-      responseType: 'json',
-    });
-
-    const orders = response.body?.data || [];
-    if (orders.length === 0) {
-      return 'N/A';
-    }
-    // Filter to ensure the correct hero_id AND correct rarity.
-    const matchingOrders = orders.filter((order) =>
-      order.hero_id === heroId && Number(order.rarity) === Number(rarity)
-    );
-    if (matchingOrders.length === 0) {
-      return 'N/A';
-    }
-    // Among matching orders, pick the lowest price_numeric.
-    const prices = matchingOrders.map((order) => parseFloat(order.price_numeric));
-    const floor = Math.min(...prices);
-    return floor.toString();
-  } catch (error) {
-    console.error(`Error fetching floor price for handle="${heroHandle}", heroId="${heroId}", rarity=${rarity}:`,
-      error.response ? error.response.body : error.message
-    );
-    return 'N/A';
-  }
-}
-
-/**
- * Retrieves hero information and supply details from Fantasy Top,
- * then adds a floor price for each rarity by calling getFloorPrice().
- *
- * Steps:
- * 1. Searches for heroes by name/handle using the Hero API (hero.getHeroesByHandleOrName).
- * 2. Uses the first matching hero. 
- * 3. Fetches the hero's supply details via the Card API (card.getHeroSupply). ## |TODO: THIS ISN'T CORRECT/MATCHING TO UI DATA
- * 4. Groups supply by rarity.
- * 5. For each rarity, calls getFloorPrice() to obtain a floor price from the marketplace.
- *
- * Returns an object:
- * {
- *   name: string,
- *   supplyDetails: [
- *     {
- *       rarity: number,
- *       supply: number,
- *       lastSellPrice: string|number,
- *       floorPrice: string
- *     },
- *     ...
- *   ]
- * }
- *
- * @param {string} heroName - The hero name (or handle) to search for.
- * @returns {Promise<Object|null>}
- */
-export async function getHeroInfo(heroName) {
-  try {
-    // 1. Search for the hero by name/handle
-    const heroResponse = await fantasyApi.hero.getHeroesByHandleOrName({ search: heroName });
-    if (!heroResponse.data || heroResponse.data.length === 0) {
-      console.error(`No hero found with the name: ${heroName}`);
-      return null;
-    }
-    const hero = heroResponse.data[0];
+    // Clean the input - trim spaces for consistency
+    const cleanName = heroName.trim();
     
-    // We'll use hero.handle if available, else hero.name, to query the marketplace
-    const heroHandle = hero.handle || hero.name;
-    const heroId = hero.id; // e.g. "423164349"
-    console.log(heroHandle, heroId);
-
-    // 2. Fetch hero supply
-    const supplyResponse = await fantasyApi.card.getHeroSupply({ heroId: heroId });
-    const rawSupplyData = supplyResponse.data || [];
-    console.log(rawSupplyData);
-    if (rawSupplyData.length === 0) {
-      console.warn(`No supply data found for hero: ${hero.name}`);
-      return { name: hero.name, supplyDetails: [] };
+    console.log(`Searching for hero with name: "${cleanName}"`);
+    
+    // Try the original search first
+    const response = await fantasyApi.hero.getHeroesByHandleOrName({
+      search: cleanName
+    });
+    
+    // Access the data array from the response
+    const heroes = response.data || [];
+    
+    // Check if we have results
+    if (heroes && heroes.length > 0) {
+      console.log(`Found hero: ${heroes[0].handle || heroes[0].name}`);
+      return heroes[0];
     }
-
-    // 3. Group supply by rarity to avoid duplicates
-    const grouped = {};
-    for (const detail of rawSupplyData) {
-      const rarityKey = detail.rarity;
-      if (!grouped[rarityKey]) {
-        grouped[rarityKey] = { ...detail };
-      } else {
-        grouped[rarityKey].supply = detail.supply;
-        // Optionally handle or merge lastSellPrice if needed.
-      }
-    }
-    const uniqueDetails = Object.values(grouped);
-
-    // 4. For each rarity, fetch the floor price from the marketplace
-    const supplyDetails = await Promise.all(
-      uniqueDetails.map(async (detail) => {
-        const floor = await getFloorPrice(heroHandle, heroId, detail.rarity);
-        return {
-          rarity: detail.rarity,
-          supply: detail.supply,
-          lastSellPrice: detail.lastSellPrice !== undefined ? detail.lastSellPrice : 'N/A',
-          floorPrice: floor,
-        };
-      })
-    );
-
-    // 5. Return final result
-    return {
-      name: hero.name,
-      supplyDetails
-    };
-
+    
+    console.log(`No hero found with name: "${heroName}"`);
+    return null;
   } catch (error) {
-    console.error(
-      'Error fetching hero info:',
-      error.response ? error.response.data : error.message
-    );
+    console.error('Error fetching hero by name:', error.response?.data || error.message);
     throw error;
   }
 }
 
-// If this module is run directly, run a quick test
-if (process.argv[1].includes('fantasyService.mjs')) {
-  (async () => {
-    // If you run "node fantasyService.mjs rasmr" => heroName="rasmr"
-    const heroName = process.argv[2] || 'Evan Van Ness 🧉';
-    console.log(`Fetching hero info for: ${heroName}`);
-    try {
-      const heroInfo = await getHeroInfo(heroName);
-      if (heroInfo) {
-        console.log('Hero Info:');
-        console.log(JSON.stringify(heroInfo, null, 2));
-      } else {
-        console.log('No hero info returned.');
-      }
-    } catch (error) {
-      console.error('Test run failed:', error);
+/**
+ * Fetch heroes by a list of IDs.
+ * @param {Array<string>} heroIds - List of hero IDs.
+ * @returns {Promise<Array>} - The heroes data.
+ */
+export async function fetchHeroesByIds(heroIds) {
+  try {
+    console.log('Requesting hero data for IDs:', heroIds);
+    const response = await fantasyApi.hero.getHeroesByIds({
+      ids: heroIds
+    });
+    
+    // Handle both response formats (direct data or nested in data property)
+    const heroes = response.data || response;
+    console.log(`Found ${heroes.length} heroes by IDs`);
+    
+    return heroes;
+  } catch (error) {
+    console.error('Error fetching heroes by IDs:', error.response?.data || error.message);
+    throw error;
+  }
+}
+
+/**
+ * Fetch heroes by a list of names.
+ * @param {Array<string>} heroNames - List of hero names.
+ * @returns {Promise<Array>} - The heroes data.
+ */
+export async function fetchHeroesByNames(heroNames) {
+  try {
+    console.log('Requesting hero data for names:', heroNames);
+    const heroIds = await Promise.all(heroNames.map(async (name) => {
+      const hero = await fetchHeroByName(name);
+      return hero ? hero.id : null;
+    }));
+    
+    const validHeroIds = heroIds.filter(id => id !== null);
+    if (validHeroIds.length === 0) {
+      console.log('No valid hero IDs found.');
+      return [];
     }
-  })();
+    
+    return fetchHeroesByIds(validHeroIds);
+  } catch (error) {
+    console.error('Error fetching heroes by names:', error.response?.data || error.message);
+    throw error;
+  }
+}
+
+/**
+ * Fetch card details by card ID.
+ * @param {string} cardId - Card ID.
+ * @returns {Promise<Object>} - Card details.
+ */
+export async function fetchCardById(cardId) {
+  try {
+    const response = await fantasyApi.card.getCardById({
+      id: cardId
+    });
+    
+    return response.data || response;
+  } catch (error) {
+    console.error('Error fetching card by ID:', error.response?.data || error.message);
+    throw error;
+  }
+}
+
+/**
+ * Fetch hero supply details by hero ID.
+ * @param {string} heroId - Hero ID.
+ * @returns {Promise<Array>} - Hero supply details.
+ */
+export async function fetchHeroSupply(heroId) {
+  try {
+    console.log(`Fetching supply details for hero ID: ${heroId}`);
+    const response = await fantasyApi.card.getHeroSupply({
+      heroId: heroId
+    });
+    
+    // Handle response format - may be nested in data property
+    const supplyData = response.data || response;
+    
+    if (!supplyData || !Array.isArray(supplyData)) {
+      console.warn(`Unexpected response format for hero supply: ${JSON.stringify(response)}`);
+      return [];
+    }
+    
+    console.log(`Got supply details: ${supplyData.length} entries`);
+    return supplyData;
+  } catch (error) {
+    console.error('Error fetching hero supply:', error.response?.data || error.message);
+    throw error;
+  }
+}
+
+/**
+ * Get the rarity name based on the rarity level (1-4).
+ * @param {number} rarityLevel - Rarity level (1-4).
+ * @returns {string} - Rarity name.
+ */
+function getRarityName(rarityLevel) {
+  switch (rarityLevel) {
+    case 4:
+      return 'Common';
+    case 3:
+      return 'Rare';
+    case 2:
+      return 'Epic';
+    case 1:
+      return 'Legendary';
+    default:
+      return 'Unknown';
+  }
+}
+
+/**
+ * Get the lowest price (floor) for a hero's rarity.
+ * @param {string} heroRarityIndex - Hero rarity index in format "heroId_rarityLevel"
+ * @returns {Promise<string|null>} - Raw wei value or null if not available
+ */
+async function getLowestPriceForHeroRarity(heroRarityIndex) {
+  try {
+    const response = await fantasyApi.marketplace.getLowestPriceForHeroRarity({
+      heroRarityIndex: heroRarityIndex
+    });
+    
+    // Better logging of the response
+    console.log(`Floor price response for ${heroRarityIndex}:`, response?.data);
+    
+    // Return raw wei value - will be formatted in the bot
+    if (response && response.data !== undefined && response.data !== null) {
+      return response.data;
+    }
+    
+    console.log(`No valid floor price found for ${heroRarityIndex}`);
+    return null;
+  } catch (error) {
+    console.warn(`Failed to get lowest price for ${heroRarityIndex}: ${error.message}`);
+    return null;
+  }
+}
+
+/**
+ * Comprehensive function to get all hero market information from multiple API sources.
+ * Combines data from both supply API and marketplace API for complete market information.
+ * Returns raw wei values for prices.
+ * 
+ * @param {string} heroName - Hero's handle or name.
+ * @returns {Promise<Object|null>} - Complete hero information with detailed market data.
+ */
+export async function getHeroMarketInfo(heroName) {
+  try {
+    console.log(`Getting detailed market info for hero: ${heroName}`);
+    
+    // First get the basic hero info
+    let hero = await fetchHeroByName(heroName);
+    
+    // If not found, try with _eth suffix if not already present
+    if (!hero && !heroName.toLowerCase().endsWith('_eth')) {
+      console.log(`Trying with _eth suffix: ${heroName}_eth`);
+      hero = await fetchHeroByName(`${heroName}_eth`);
+    }
+    
+    if (!hero) {
+      console.error(`Could not find hero with name/handle: ${heroName}`);
+      return null;
+    }
+
+    console.log(`Successfully found hero: ${hero.handle || hero.name} (ID: ${hero.id})`);
+    
+    // Step 1: Fetch hero supply details
+    const supplyDetails = await fetchHeroSupply(hero.id);
+    console.log(`Got supply details: ${supplyDetails.length} entries`);
+    
+    // Step 2: Process the supply data into a market info structure
+    const marketInfo = {};
+    supplyDetails.forEach(detail => {
+      const rarityLevel = detail.rarity;
+      // Log the raw data for each rarity
+      console.log(`Raw supply detail for rarity ${rarityLevel}:`, JSON.stringify(detail, null, 2));
+      
+      marketInfo[rarityLevel] = {
+        rarity: rarityLevel,
+        rarityName: getRarityName(rarityLevel),
+        supply: detail.supply || null,
+        highestBid: detail.highest_bid?.price || null,
+        lastSellPrice: detail.last_trade?.price || null,
+        floorPrice: null // Will be populated with getLowestPriceForHeroRarity
+      };
+    });
+    
+    // Step 3: For each rarity level, enhance data with marketplace API
+    const rarityLevels = [4, 3, 2, 1]; // Common, Rare, Epic, Legendary
+    
+    await Promise.all(rarityLevels.map(async (level) => {
+      // Only create an entry if we don't have it from supply data
+      if (!marketInfo[level]) {
+        marketInfo[level] = {
+          rarity: level,
+          rarityName: getRarityName(level),
+          supply: null,
+          highestBid: null,
+          lastSellPrice: null,
+          floorPrice: null
+        };
+      }
+      
+      // Get lowest price (current floor) for each rarity level
+      const rarityIndex = `${hero.id}_${level}`;
+      marketInfo[level].floorPrice = await getLowestPriceForHeroRarity(rarityIndex);
+      
+      // Enhance with more market data from getCardMarketBasicInfo
+      try {
+        const response = await fantasyApi.marketplace.getCardMarketBasicInfo({
+          heroRarityIndex: rarityIndex
+        });
+        
+        const data = response.data || response;
+        
+        // Update highest bid if available and not already set
+        if (data && data.highest_bid && data.highest_bid.price !== undefined && !marketInfo[level].highestBid) {
+          marketInfo[level].highestBid = data.highest_bid.price;
+          console.log(`Updated highest bid for ${rarityIndex}: ${data.highest_bid.price}`);
+        }
+        
+        // Update last sell price if available and not already set
+        if (data && data.last_trade && data.last_trade.price !== undefined && !marketInfo[level].lastSellPrice) {
+          marketInfo[level].lastSellPrice = data.last_trade.price;
+          console.log(`Updated last trade price for ${rarityIndex}: ${data.last_trade.price}`);
+        }
+      } catch (error) {
+        console.warn(`Failed to get market data for ${rarityIndex}: ${error.message}`);
+      }
+    }));
+    
+    console.log('Final market info:');
+    console.log(JSON.stringify(marketInfo, null, 2));
+    
+    // Return complete hero info with raw wei values
+    return {
+      id: hero.id,
+      name: hero.handle || hero.name,
+      profileImage: hero.profile_image_url_https,
+      followers: hero.followers_count || 0,
+      stars: hero.stars || 0,
+      marketInfo: marketInfo
+    };
+  } catch (error) {
+    console.error('Error getting hero market info:', error.message);
+    throw error;
+  }
 }
