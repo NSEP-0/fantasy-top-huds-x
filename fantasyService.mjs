@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 import { Client, Configuration } from '@fantasy-top/sdk-pro';
+import { getRarityName } from './utils/formatters.mjs';
 
 // Load environment variables
 dotenv.config();
@@ -16,38 +17,124 @@ const config = new Configuration({
 
 export const fantasyApi = Client.getInstance(config);
 
+// Rate limiting configuration
+const API_RATE_LIMIT = {
+  maxRequestsPerMinute: 60, // Adjust based on actual API limits
+  requestHistory: [],
+  resetTimeoutId: null
+};
+
+/**
+ * Rate limiter utility for API calls
+ * @returns {Promise<void>} Resolves when it's safe to make a request
+ */
+async function rateLimiter() {
+  // Clean old requests (older than 1 minute)
+  const now = Date.now();
+  const oneMinuteAgo = now - 60000;
+  API_RATE_LIMIT.requestHistory = API_RATE_LIMIT.requestHistory.filter(
+    timestamp => timestamp > oneMinuteAgo
+  );
+  
+  // Check if we've hit the rate limit
+  if (API_RATE_LIMIT.requestHistory.length >= API_RATE_LIMIT.maxRequestsPerMinute) {
+    // Calculate how long to wait before next request
+    const oldestRequest = API_RATE_LIMIT.requestHistory[0];
+    const timeToWait = oldestRequest + 60000 - now;
+    
+    console.warn(`Rate limit reached. Waiting ${Math.ceil(timeToWait/1000)} seconds...`);
+    
+    return new Promise(resolve => {
+      setTimeout(() => {
+        // Try again after waiting
+        resolve(rateLimiter());
+      }, timeToWait + 100); // Add 100ms buffer
+    });
+  }
+  
+  // Record this request
+  API_RATE_LIMIT.requestHistory.push(now);
+  return Promise.resolve();
+}
+
+/**
+ * Wrapper function to apply rate limiting and retries to API calls
+ * @param {Function} apiCall - Function that makes the API call
+ * @param {Array} args - Arguments to pass to the API call
+ * @param {Object} options - Options for retries
+ * @returns {Promise} - Result of the API call
+ */
+async function withRateLimitAndRetry(apiCall, args = [], options = {}) {
+  const { maxRetries = 3, baseDelay = 1000 } = options;
+  let lastError = null;
+  
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      // Wait for rate limiter before proceeding
+      await rateLimiter();
+      
+      // Make the API call
+      return await apiCall(...args);
+    } catch (error) {
+      lastError = error;
+      
+      // Check if it's a rate limit error or other retriable error
+      const isRateLimit = 
+        error.message.includes('rate limit') || 
+        error.message.includes('too many requests') ||
+        (error.response && (error.response.status === 429 || error.response.status === 403));
+      
+      if (attempt < maxRetries) {
+        // Calculate exponential backoff delay
+        const delay = isRateLimit ? 
+          baseDelay * Math.pow(2, attempt) : // Rate limit: exponential backoff
+          baseDelay * (attempt + 1); // Other errors: linear backoff
+        
+        console.warn(`API call failed with ${error.response?.status || 'unknown'} status. Retrying in ${delay/1000} seconds... (Attempt ${attempt+1}/${maxRetries})`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      } else {
+        console.error(`API call failed after ${maxRetries} retries.`, error);
+        throw error;
+      }
+    }
+  }
+  
+  throw lastError;
+}
+
 /**
  * Fetch a hero by handle or name, with enhanced search capabilities.
  * @param {string} heroName - Hero's handle or name.
  * @returns {Promise<Object>} - The hero object or null if not found.
  */
 export async function fetchHeroByName(heroName) {
-  try {
-    // Clean the input - trim spaces for consistency
-    const cleanName = heroName.trim();
-    
-    console.log(`Searching for hero with name: "${cleanName}"`);
-    
-    // Try the original search first
-    const response = await fantasyApi.hero.getHeroesByHandleOrName({
-      search: cleanName
-    });
-    
-    // Access the data array from the response
-    const heroes = response.data || [];
-    
-    // Check if we have results
-    if (heroes && heroes.length > 0) {
-      console.log(`Found hero: ${heroes[0].handle || heroes[0].name}`);
-      return heroes[0];
-    }
-    
-    console.log(`No hero found with name: "${heroName}"`);
-    return null;
-  } catch (error) {
-    console.error('Error fetching hero by name:', error.response?.data || error.message);
-    throw error;
-  }
+  return withRateLimitAndRetry(
+    async (name) => {
+      // Clean the input - trim spaces for consistency
+      const cleanName = name.trim();
+      
+      console.log(`Searching for hero with name: "${cleanName}"`);
+      
+      // Try the original search first
+      const response = await fantasyApi.hero.getHeroesByHandleOrName({
+        search: cleanName
+      });
+      
+      // Access the data array from the response
+      const heroes = response.data || [];
+      
+      // Check if we have results
+      if (heroes && heroes.length > 0) {
+        console.log(`Found hero: ${heroes[0].handle || heroes[0].name}`);
+        return heroes[0];
+      }
+      
+      console.log(`No hero found with name: "${name}"`);
+      return null;
+    },
+    [heroName],
+    { maxRetries: 3, baseDelay: 2000 }
+  );
 }
 
 /**
@@ -56,21 +143,22 @@ export async function fetchHeroByName(heroName) {
  * @returns {Promise<Array>} - The heroes data.
  */
 export async function fetchHeroesByIds(heroIds) {
-  try {
-    console.log('Requesting hero data for IDs:', heroIds);
-    const response = await fantasyApi.hero.getHeroesByIds({
-      ids: heroIds
-    });
-    
-    // Handle both response formats (direct data or nested in data property)
-    const heroes = response.data || response;
-    console.log(`Found ${heroes.length} heroes by IDs`);
-    
-    return heroes;
-  } catch (error) {
-    console.error('Error fetching heroes by IDs:', error.response?.data || error.message);
-    throw error;
-  }
+  return withRateLimitAndRetry(
+    async (ids) => {
+      console.log('Requesting hero data for IDs:', ids);
+      const response = await fantasyApi.hero.getHeroesByIds({
+        ids: ids
+      });
+      
+      // Handle both response formats (direct data or nested in data property)
+      const heroes = response.data || response;
+      console.log(`Found ${heroes.length} heroes by IDs`);
+      
+      return heroes;
+    },
+    [heroIds],
+    { maxRetries: 3, baseDelay: 2000 }
+  );
 }
 
 /**
@@ -79,24 +167,25 @@ export async function fetchHeroesByIds(heroIds) {
  * @returns {Promise<Array>} - The heroes data.
  */
 export async function fetchHeroesByNames(heroNames) {
-  try {
-    console.log('Requesting hero data for names:', heroNames);
-    const heroIds = await Promise.all(heroNames.map(async (name) => {
-      const hero = await fetchHeroByName(name);
-      return hero ? hero.id : null;
-    }));
-    
-    const validHeroIds = heroIds.filter(id => id !== null);
-    if (validHeroIds.length === 0) {
-      console.log('No valid hero IDs found.');
-      return [];
-    }
-    
-    return fetchHeroesByIds(validHeroIds);
-  } catch (error) {
-    console.error('Error fetching heroes by names:', error.response?.data || error.message);
-    throw error;
-  }
+  return withRateLimitAndRetry(
+    async (names) => {
+      console.log('Requesting hero data for names:', names);
+      const heroIds = await Promise.all(names.map(async (name) => {
+        const hero = await fetchHeroByName(name);
+        return hero ? hero.id : null;
+      }));
+      
+      const validHeroIds = heroIds.filter(id => id !== null);
+      if (validHeroIds.length === 0) {
+        console.log('No valid hero IDs found.');
+        return [];
+      }
+      
+      return fetchHeroesByIds(validHeroIds);
+    },
+    [heroNames],
+    { maxRetries: 3, baseDelay: 2000 }
+  );
 }
 
 /**
@@ -105,16 +194,17 @@ export async function fetchHeroesByNames(heroNames) {
  * @returns {Promise<Object>} - Card details.
  */
 export async function fetchCardById(cardId) {
-  try {
-    const response = await fantasyApi.card.getCardById({
-      id: cardId
-    });
-    
-    return response.data || response;
-  } catch (error) {
-    console.error('Error fetching card by ID:', error.response?.data || error.message);
-    throw error;
-  }
+  return withRateLimitAndRetry(
+    async (id) => {
+      const response = await fantasyApi.card.getCardById({
+        id: id
+      });
+      
+      return response.data || response;
+    },
+    [cardId],
+    { maxRetries: 3, baseDelay: 2000 }
+  );
 }
 
 /**
@@ -123,46 +213,27 @@ export async function fetchCardById(cardId) {
  * @returns {Promise<Array>} - Hero supply details.
  */
 export async function fetchHeroSupply(heroId) {
-  try {
-    console.log(`Fetching supply details for hero ID: ${heroId}`);
-    const response = await fantasyApi.card.getHeroSupply({
-      heroId: heroId
-    });
-    
-    // Handle response format - may be nested in data property
-    const supplyData = response.data || response;
-    
-    if (!supplyData || !Array.isArray(supplyData)) {
-      console.warn(`Unexpected response format for hero supply: ${JSON.stringify(response)}`);
-      return [];
-    }
-    
-    console.log(`Got supply details: ${supplyData.length} entries`);
-    return supplyData;
-  } catch (error) {
-    console.error('Error fetching hero supply:', error.response?.data || error.message);
-    throw error;
-  }
-}
-
-/**
- * Get the rarity name based on the rarity level (1-4).
- * @param {number} rarityLevel - Rarity level (1-4).
- * @returns {string} - Rarity name.
- */
-function getRarityName(rarityLevel) {
-  switch (rarityLevel) {
-    case 4:
-      return 'Common';
-    case 3:
-      return 'Rare';
-    case 2:
-      return 'Epic';
-    case 1:
-      return 'Legendary';
-    default:
-      return 'Unknown';
-  }
+  return withRateLimitAndRetry(
+    async (id) => {
+      console.log(`Fetching supply details for hero ID: ${id}`);
+      const response = await fantasyApi.card.getHeroSupply({
+        heroId: id
+      });
+      
+      // Handle response format - may be nested in data property
+      const supplyData = response.data || response;
+      
+      if (!supplyData || !Array.isArray(supplyData)) {
+        console.warn(`Unexpected response format for hero supply: ${JSON.stringify(response)}`);
+        return [];
+      }
+      
+      console.log(`Got supply details: ${supplyData.length} entries`);
+      return supplyData;
+    },
+    [heroId],
+    { maxRetries: 3, baseDelay: 2000 }
+  );
 }
 
 /**
@@ -171,25 +242,26 @@ function getRarityName(rarityLevel) {
  * @returns {Promise<string|null>} - Raw wei value or null if not available
  */
 async function getLowestPriceForHeroRarity(heroRarityIndex) {
-  try {
-    const response = await fantasyApi.marketplace.getLowestPriceForHeroRarity({
-      heroRarityIndex: heroRarityIndex
-    });
-    
-    // Better logging of the response
-    console.log(`Floor price response for ${heroRarityIndex}:`, response?.data);
-    
-    // Return raw wei value - will be formatted in the bot
-    if (response && response.data !== undefined && response.data !== null) {
-      return response.data;
-    }
-    
-    console.log(`No valid floor price found for ${heroRarityIndex}`);
-    return null;
-  } catch (error) {
-    console.warn(`Failed to get lowest price for ${heroRarityIndex}: ${error.message}`);
-    return null;
-  }
+  return withRateLimitAndRetry(
+    async (index) => {
+      const response = await fantasyApi.marketplace.getLowestPriceForHeroRarity({
+        heroRarityIndex: index
+      });
+      
+      // Better logging of the response
+      console.log(`Floor price response for ${index}:`, response?.data);
+      
+      // Return raw wei value - will be formatted in the bot
+      if (response && response.data !== undefined && response.data !== null) {
+        return response.data;
+      }
+      
+      console.log(`No valid floor price found for ${index}`);
+      return null;
+    },
+    [heroRarityIndex],
+    { maxRetries: 2, baseDelay: 1000 }
+  );
 }
 
 /**
@@ -206,12 +278,6 @@ export async function getHeroMarketInfo(heroName) {
     
     // First get the basic hero info
     let hero = await fetchHeroByName(heroName);
-    
-    // If not found, try with _eth suffix if not already present
-    if (!hero && !heroName.toLowerCase().endsWith('_eth')) {
-      console.log(`Trying with _eth suffix: ${heroName}_eth`);
-      hero = await fetchHeroByName(`${heroName}_eth`);
-    }
     
     if (!hero) {
       console.error(`Could not find hero with name/handle: ${heroName}`);
