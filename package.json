@@ -8,6 +8,8 @@
         "start": "node bot.mjs"
     },
     "dependencies": {
+        "@aws-sdk/client-dynamodb": "^3.777.0",
+        "@aws-sdk/lib-dynamodb": "^3.777.0",
         "@fantasy-top/sdk-pro": "^1.2.4",
         "dotenv": "^16.0.0",
         "got": "^11.8.2",

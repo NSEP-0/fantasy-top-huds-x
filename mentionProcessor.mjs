@@ -14,9 +14,20 @@ import {
 import { extractPotentialHeroes } from './utils/heroExtractor.mjs';
 import { formatWeiToEth } from './utils/formatters.mjs';
 import readline from 'readline';
+// Import new mention helper functions
+import {
+  getMentionType,
+  extractUserInfo,
+  shouldRespondToMention,
+  formatReplyText
+} from './mentionHelper.mjs';
 
-// Maximum age for tweets to process (60 minutes in milliseconds)
-const MAX_TWEET_AGE_MS = 4000000;
+// Maximum age for tweets to process (15 minutes in milliseconds)
+const MAX_TWEET_AGE_MS = 900000;
+
+// Get the bot's username from environment variable or use default
+const BOT_USERNAME = process.env.TWITTER_USERNAME || 'FantasyTopHuds';
+const BOT_USER_ID = process.env.TWITTER_USER_ID;
 
 /**
  * Creates a formatted tweet with hero market info
@@ -24,9 +35,15 @@ const MAX_TWEET_AGE_MS = 4000000;
  * 
  * @param {Object} heroInfo - The hero information object
  * @param {string|null} username - Username to mention in the reply
- * @returns {string} - Formatted tweet text
+ * @returns {Object} - Formatted tweet content object
  */
 function createHeroInfoResponse(heroInfo, username) {
+  // Maximum tweet length allowed by Twitter
+  const MAX_TWEET_LENGTH = 280;
+  
+  // Call to action text that we'll add if there's room
+  const CALL_TO_ACTION = "\nCheck out more on Fantasy Top!";
+  
   // Always include username if provided (whether direct reply or not)
   // This ensures the user gets notified when we respond
   let message = username ? `@${username} ` : '';
@@ -76,10 +93,27 @@ function createHeroInfoResponse(heroInfo, username) {
     message += line + '\n';
   });
 
-  // Add a call to action
-  message += `\nCheck out more on Fantasy Top!`;
+  // Add a call to action only if it fits within the character limit
+  if (message.length + CALL_TO_ACTION.length <= MAX_TWEET_LENGTH) {
+    message += CALL_TO_ACTION;
+  } else {
+    // Log that we're omitting the call to action due to length constraints
+    console.log(`⚠️ Tweet is too long (${message.length} chars), omitting call to action`);
+    
+    // If the message is still too long, truncate it with an ellipsis
+    if (message.length > MAX_TWEET_LENGTH) {
+      message = message.substring(0, MAX_TWEET_LENGTH - 3) + '...';
+      console.log(`⚠️ Tweet truncated to ${message.length} characters`);
+    }
+  }
   
-  return message;
+  // Log the final tweet length
+  console.log(`📏 Final tweet length: ${message.length}/${MAX_TWEET_LENGTH} characters`);
+  
+  return {
+    text: message,
+    heroName: heroInfo.name
+  };
 }
 
 /**
@@ -117,6 +151,15 @@ function isDirectReply(mention) {
 }
 
 /**
+ * Sleep/delay function
+ * @param {number} ms - Milliseconds to sleep
+ * @returns {Promise<void>}
+ */
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
  * Processes incoming mentions:
  * - Fetches new mentions since the last processed ID or from the last X minutes
  * - Uses entity annotations to identify heroes when available
@@ -129,7 +172,8 @@ export async function processMentions() {
     mentionsFound: 0,
     mentionsProcessed: 0,
     repliesSent: 0,
-    errors: 0
+    errors: 0,
+    retries: 0
   };
   
   try {
@@ -141,11 +185,21 @@ export async function processMentions() {
     // Fetch mentions, use either lastMentionId or time-based filtering
     const fetchOptions = {};
     if (lastMentionId) {
+      console.log(`📊 Using lastMentionId for filtering: ${lastMentionId}`);
       fetchOptions.sinceId = lastMentionId;
     } else {
       // If we don't have a lastMentionId, fetch mentions from last X minutes
-      fetchOptions.minutesAgo = MAX_TWEET_AGE_MS / 60000;
+      const minutesAgo = MAX_TWEET_AGE_MS / 60000;
+      console.log(`⏰ No lastMentionId found. Using time range filter: Last ${minutesAgo} minutes`);
+      fetchOptions.minutesAgo = minutesAgo;
+      
+      // Convert to a date for logging purposes
+      const startTime = new Date(new Date().getTime() - MAX_TWEET_AGE_MS);
+      console.log(`📅 Twitter API start_time format: ${startTime.toISOString().replace(/\.\d{3}Z$/, 'Z')}`);
     }
+    
+    // Debug what we're requesting
+    console.log(`📤 Fetch options: ${JSON.stringify(fetchOptions, null, 2)}`);
     
     const mentions = await getMentions(fetchOptions);
     stats.mentionsFound = mentions.length;
@@ -171,13 +225,20 @@ export async function processMentions() {
           await saveLastMentionId(mention.id);
           continue;
         }
+
+        // Determine if this is a direct or indirect mention
+        const mentionType = getMentionType(mention, BOT_USERNAME);
+        console.log(`Mention type: ${mentionType.isDirect ? 'Direct' : 'Indirect'} mention at position ${mentionType.mentionPosition}`);
         
-        const text = mention.text;
+        // Skip if we shouldn't respond to this mention
+        if (!shouldRespondToMention(mention, mentionType, BOT_USER_ID)) {
+          console.log(`Skipping tweet ${mention.id} - not a valid mention to respond to`);
+          await saveLastMentionId(mention.id);
+          continue;
+        }
+        
+        const text = mentionType.cleanedText || mention.text;
         const entities = mention.entities || {};
-        
-        // Log whether this is a direct reply - but process ALL mentions regardless
-        const isReply = isDirectReply(mention);
-        console.log(`Is direct reply to another user: ${isReply} (Note: Processing ALL mentions)`);
         
         // Extract candidate heroes using the heroes database AND Twitter annotations
         const candidateHeroes = await extractPotentialHeroes(text, entities);
@@ -235,67 +296,108 @@ export async function processMentions() {
               console.log(`Fetched username for author_id ${mention.author_id}: ${username}`);
             } catch (error) {
               console.error(`Failed to get username for author_id ${mention.author_id}:`, error.message);
-              // Record error but continue without username - will just post without the @username mention
-              await recordError(error, `Failed to get username for author_id ${mention.author_id}`);
-              stats.errors++;
+              // Don't record this as an error in the state, just log to console
+              // This is a known issue with the Twitter API rate limits
+              stats.errors++; // Still count it in stats but don't log to state
             }
           }
 
-          // Always create a response that includes the username (for notification)
-          const replyText = createHeroInfoResponse(heroFound, username);
+          // Extract user info
+          const userInfo = {
+            authorId: mention.author_id,
+            authorUsername: username,
+            authorDisplayName: null
+          };
+
+          // Create hero response and format based on mention type
+          const heroResponse = createHeroInfoResponse(heroFound, username);
+          
+          // Format the reply text based on mention type
+          const replyText = formatReplyText(heroResponse, mentionType, userInfo);
+          
           console.log('Replying with:', replyText);
           
           let replySuccess = false;
-          try {
-            await postTweet(tokens, replyText, mention.id);
-            console.log(`Replied to mention ID: ${mention.id}`);
-            replySuccess = true;
-            stats.repliesSent++;
-            
-            // Mark this tweet as replied to
-            await markTweetAsReplied(mention.id, {
-              heroName: heroFound.name,
-              authorUsername: username || mention.author_id,
-              replyText: replyText.substring(36, 69) + '...' || '' // Store preview of reply
-            });
-          } catch (error) {
-            // Enhanced error handling for Twitter API errors
-            stats.errors++;
-            
-            // Create a descriptive error message
-            const errorContext = `Failed to post reply to tweet ${mention.id}`;
-            let errorDetails = '';
-            
-            if (error.isTwitterError) {
-              // Format Twitter API errors with more context
-              errorDetails = `Twitter API error (${error.statusCode}): `;
+          let retryCount = 0;
+          const MAX_RETRIES = 0; // Set to 0 for no retries
+          
+          while (!replySuccess && retryCount <= MAX_RETRIES) {
+            try {
+              if (retryCount > 0) {
+                const delay = retryCount * 10000; // Increase delay with each retry (10s, 20s, 30s)
+                console.log(`⏳ Retry ${retryCount}/${MAX_RETRIES} - Waiting ${delay/1000}s before retrying...`);
+                await sleep(delay);
+                console.log(`🔄 Retrying tweet post to ${mention.id}...`);
+                stats.retries++;
+              }
               
-              if (error.twitterError) {
-                if (error.twitterError.detail) {
-                  errorDetails += error.twitterError.detail;
-                }
-                if (error.twitterError.title) {
-                  errorDetails += ` (${error.twitterError.title})`;
-                }
+              await postTweet(tokens, replyText, mention.id);
+              console.log(`Replied to mention ID: ${mention.id}`);
+              replySuccess = true;
+              stats.repliesSent++;
+              
+              // Mark this tweet as replied to
+              await markTweetAsReplied(mention.id, {
+                heroName: heroFound.name,
+                authorUsername: username || mention.author_id,
+                replyText: replyText.substring(90, 150) + '...' || '', // Store preview of reply
+                mentionType: mentionType.isDirect ? 'direct' : 'indirect'
+              });
+            } catch (error) {
+              // Determine if we should retry
+              const shouldRetry = 
+                error.isTwitterError && 
+                error.statusCode === 403 && 
+                (error.message.includes('not permitted to perform this action') ||
+                 (error.twitterError?.detail?.includes('not permitted to perform this action')));
+                
+              if (shouldRetry && retryCount < MAX_RETRIES) {
+                // We'll retry - increment the counter and continue loop
+                retryCount++;
+                console.log(`⚠️ Received Twitter 403 error - may be posting too quickly. Will retry.`);
               } else {
-                errorDetails += error.message;
+                // We've either exhausted retries or it's another type of error
+                stats.errors++;
+                
+                // Create a descriptive error message
+                const errorContext = `Failed to post reply to tweet ${mention.id}`;
+                let errorDetails = '';
+                
+                if (error.isTwitterError) {
+                  // Format Twitter API errors with more context
+                  errorDetails = `Twitter API error (${error.statusCode}): `;
+                  
+                  if (error.twitterError) {
+                    if (error.twitterError.detail) {
+                      errorDetails += error.twitterError.detail;
+                    }
+                    if (error.twitterError.title) {
+                      errorDetails += ` (${error.twitterError.title})`;
+                    }
+                  } else {
+                    errorDetails += error.message;
+                  }
+                  
+                  // Add hints for common errors
+                  if (error.statusCode === 403) {
+                    console.error(`🚫 Permission error (403) when posting tweet. Check app permissions and duplicate content.`);
+                  } else if (error.statusCode === 401) {
+                    console.error(`🔐 Authentication error (401). Tokens may be expired. Try resetting authentication.`);
+                  }
+                } else {
+                  // General error
+                  errorDetails = error.message;
+                }
+                
+                console.error(`Error posting reply: ${errorDetails}`);
+                
+                // Record this error in our state
+                await recordError(error, errorContext);
+                
+                // Break the retry loop
+                break;
               }
-              
-              // Add hints for common errors
-              if (error.statusCode === 403) {
-                console.error(`🚫 Permission error (403) when posting tweet. Check app permissions and duplicate content.`);
-              } else if (error.statusCode === 401) {
-                console.error(`🔐 Authentication error (401). Tokens may be expired. Try resetting authentication.`);
-              }
-            } else {
-              // General error
-              errorDetails = error.message;
             }
-            
-            console.error(`Error posting reply: ${errorDetails}`);
-            
-            // Record this error in our state
-            await recordError(error, errorContext);
           }
           
           // Always update lastMentionId, even if reply failed
@@ -327,8 +429,27 @@ export async function processMentions() {
  */
 export async function testProcessMention(tweetId, username, tweetText) {
   console.log(`Testing mention processing with simulated tweet: "${tweetText}"`);
+  
+  // Create simulated tweet for mention type detection
+  const simulatedTweet = {
+    id: tweetId || 'simulated_12345',
+    text: tweetText,
+    author_id: 'simulated_user_id'
+  };
+  
+  // Determine mention type
+  const mentionType = getMentionType(simulatedTweet, BOT_USERNAME);
+  console.log(`Mention type: ${mentionType.isDirect ? 'Direct' : 'Indirect'} mention at position ${mentionType.mentionPosition}`);
+  
+  // Create user info
+  const userInfo = {
+    authorId: 'simulated_user_id',
+    authorUsername: username,
+    authorDisplayName: 'Test User'
+  };
+  
   // Extract candidate heroes using the heroes database
-  const candidateHeroes = await extractPotentialHeroes(tweetText);
+  const candidateHeroes = await extractPotentialHeroes(mentionType.cleanedText || tweetText);
   if (candidateHeroes.length === 0) {
     console.log(`No candidate heroes found in tweet text`);
     return;
@@ -360,7 +481,9 @@ export async function testProcessMention(tweetId, username, tweetText) {
     }
     
     // Create a properly formatted response with hero market details
-    const replyText = createHeroInfoResponse(heroFound, username);
+    const heroResponse = createHeroInfoResponse(heroFound, username);
+    const replyText = formatReplyText(heroResponse, mentionType, userInfo);
+    
     console.log('Would reply with:');
     console.log(replyText);
     

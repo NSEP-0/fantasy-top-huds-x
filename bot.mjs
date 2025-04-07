@@ -214,7 +214,7 @@ async function showStatistics() {
   
   console.log(`\n🐦 TWITTER ACTIVITY:`);
   console.log(`- Total mentions processed: ${stats.twitter.processedCount}`);
-  console.log(`- Last mention ID: ${stats.twitter.lastMentionId || 'None'}`);
+  console.log(`- Last mention ID: ${stats.twitter.lastMentionId || null}`);
   console.log(`- Last processed: ${stats.twitter.lastProcessedAt || 'Never'}`);
   
   console.log(`\n💬 REPLIES:`);

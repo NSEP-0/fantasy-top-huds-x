@@ -34,14 +34,3 @@ node bot.mjs
 ## Configuration
 
 Create a `.env` file in the project root with the following variables:
-```
-## X Configurations
-CONSUMER_KEY
-CONSUMER_KEY
-CONSUMER_SECRET
-TWITTER_USER_ID
-
-## FantasyTop Configurations
-API_URL=https://api-v2.fantasy.top
-FTOP_API_KEY
-ENABLE_MENTION_POLLING=false

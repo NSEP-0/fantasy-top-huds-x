@@ -1,0 +1,36 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Globals:
+  Function:
+    Timeout: 300
+    MemorySize: 512
+
+Resources:
+  FantasyTopBotFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      Architectures: [x86_64]
+      Environment:
+        Variables:
+          STATE_TABLE_NAME: !Ref FantasyBotStateTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FantasyBotStateTable
+      Events:
+        ScheduledTrigger:
+          Type: Schedule
+          Properties:
+            Schedule: rate(15 minutes)
+    Metadata:
+      Dockerfile: Dockerfile
+      DockerContext: ./
+
+  FantasyBotStateTable:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      TableName: FantasyBotState
+      PrimaryKey:
+        Name: stateId
+        Type: String

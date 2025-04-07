@@ -1,6 +1,29 @@
-*.env
-apiSamples.json
+# Runtime state files
+.state/
+state.json
 tokens.json
+backups/
+
+# Environment variables
+.env
+
+# Node.js dependencies
+node_modules/
+npm-debug.log
+
+# Runtime logs
+*.log
+
+# IDE specific files
+.vscode/
+.idea/
+*.swp
+*.swo
+apiSamples.json
 package-lock.json
-node_modules
 .npmrc
+.aws-sam/
+.env.json
+tokens_*
+state*
+

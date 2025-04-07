@@ -156,159 +156,159 @@ if (process.argv[1].includes('twitterClient.mjs')) {
 
 /**
  * Fetches recent mentions for the authenticated user from Twitter API
- * Provides flexible options for time-based or ID-based filtering
- * Includes robust error handling for API rate limits
- * 
  * @param {Object} options - Options for fetching mentions
- * @param {string} [options.sinceId] - Only fetch tweets newer than this ID
- * @param {number} [options.minutesAgo] - Only fetch tweets from the last X minutes
  * @returns {Promise<Array>} - An array of mention tweets or empty array if none
  */
 export async function getMentions(options = {}) {
-  const userId = process.env.TWITTER_USER_ID;
-  if (!userId) {
-    console.error('❌ TWITTER_USER_ID not defined in environment variables');
-    throw new Error('TWITTER_USER_ID not defined in environment variables');
-  }
-
-  console.log(`🔍 Fetching mentions for user ID: ${userId}...`);
-  
-  try {  
-    // Include more fields in the API request for better processing
-    let url = `https://api.twitter.com/2/users/${userId}/mentions?tweet.fields=created_at,entities,author_id,in_reply_to_user_id&expansions=author_id`;
+  try {
+    console.log(`🔍 Fetching mentions for user ID: ${process.env.TWITTER_USER_ID}...`);
     
-    // Note: removed user.fields=username as it might be causing issues with some API versions
-    
-    // Add start_time parameter if minutesAgo is provided - use the correct format
-    if (options.minutesAgo) {
-      // Cap at 24 hours to avoid potential issues
-      const safeMinutesAgo = Math.min(options.minutesAgo, 24 * 60);
-      
-      // For older API versions, use a different date format
-      const startTime = new Date(Date.now() - (safeMinutesAgo * 60 * 1000));
-      const formattedTime = formatTwitterDate(startTime);
-      url += `&start_time=${formattedTime}`;
-      console.log(`⏰ Time range filter: Last ${safeMinutesAgo} minutes (since ${startTime.toLocaleString()})`);
-      console.log(`📅 Twitter API start_time format: ${formattedTime}`);
-    }
-
-    // Add sinceId parameter if provided
-    if (options.sinceId) {
-      url += `&since_id=${options.sinceId}`;
-      console.log(`🔢 ID-based filter: Mentions since ID ${options.sinceId}`);
-    }
-    
-    console.log(`🔗 Full Twitter API request URL: ${url}`);
-    
-    // Use the same OAuth mechanism as for posting tweets
+    // Load authentication tokens
     console.log('🔑 Loading authentication tokens...');
     const tokens = await loadTokens();
     if (!tokens) {
-      throw new Error('Missing OAuth tokens');
+      throw new Error('No authentication tokens available');
+    }
+    console.log(`🔑 Loaded tokens for @${tokens.screen_name}`);
+
+    // Either use sinceId or calculate start_time
+    let queryParams = {};
+    
+    if (options.sinceId) {
+      console.log(`🔍 Using since_id filtering with ID: ${options.sinceId}`);
+      queryParams.since_id = options.sinceId;
+    } else if (options.minutesAgo) {
+      const minutesAgo = options.minutesAgo;
+      console.log(`⏰ Time range filter: Last ${minutesAgo} minutes`);
+      
+      // Calculate start_time
+      const now = new Date();
+      console.log(`Current time (local): ${now.toLocaleString()}`);
+      console.log(`Current time (UTC): ${now.toUTCString()}`);
+      
+      const startTime = new Date(now.getTime() - minutesAgo * 60 * 1000);
+      console.log(`Start time (local): ${startTime.toLocaleString()}`);
+      console.log(`Start time (UTC): ${startTime.toUTCString()}`);
+      
+      // Format for Twitter API - YYYY-MM-DDTHH:mm:ssZ
+      // Manually format to ensure exact compliance with Twitter's requirements
+      const year = startTime.getUTCFullYear();
+      const month = String(startTime.getUTCMonth() + 1).padStart(2, '0');
+      const day = String(startTime.getUTCDate()).padStart(2, '0');
+      const hours = String(startTime.getUTCHours()).padStart(2, '0');
+      const minutes = String(startTime.getUTCMinutes()).padStart(2, '0');
+      const seconds = String(startTime.getUTCSeconds()).padStart(2, '0');
+      
+      const formattedStartTime = `${year}-${month}-${day}T${hours}:${minutes}:${seconds}Z`;
+      console.log(`📅 Twitter API start_time format: ${formattedStartTime}`);
+      
+      queryParams.start_time = formattedStartTime;
+      
+      // Validate the format with a regex test
+      const isCorrectFormat = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(formattedStartTime);
+      console.log(`Is format valid for Twitter API? ${isCorrectFormat ? 'Yes' : 'No'}`);
     }
     
-    // Use proper OAuth 1.0a authentication with exact URL used in the request
-    const token = {
-      key: tokens.oauth_token,
-      secret: tokens.oauth_token_secret,
-    };
+    // Add necessary fields
+    queryParams['tweet.fields'] = 'created_at,entities,author_id,in_reply_to_user_id';
+    queryParams['expansions'] = 'author_id';
     
-    const authHeader = oauth.toHeader(
-      oauth.authorize({
-        url,
-        method: 'GET'
-      }, token)
-    );
+    // Create final URL with all parameters
+    const userId = process.env.TWITTER_USER_ID;
+    const baseUrl = `https://api.twitter.com/2/users/${userId}/mentions`;
+    const queryString = Object.entries(queryParams)
+      .map(([key, value]) => `${key}=${encodeURIComponent(value)}`)
+      .join('&');
+    const fullUrl = `${baseUrl}?${queryString}`;
     
+    console.log(`🔗 Full Twitter API request URL: ${fullUrl}`);
+    
+    // Send the request
     console.log('📡 Sending request to Twitter API...');
-    const response = await got.get(url, {
-      headers: {
-        Authorization: authHeader['Authorization'],
-        'Content-Type': 'application/json',
-        // Add User-Agent header which is sometimes required
-        'User-Agent': 'FantasyTopTwitterBot/1.0'
-      },
-      responseType: 'json',
-      retry: {
-        limit: 3,
-        methods: ['GET'],
-        statusCodes: [429, 403, 500, 502, 503, 504], // Added 403 for authorization errors
-        calculateDelay: ({ error, retryCount }) => {
-          // Check Twitter rate limit headers if available
-          if (error.response && error.response.headers) {
-            const resetTime = error.response.headers['x-rate-limit-reset'];
-            if (resetTime) {
-              const resetTimestamp = parseInt(resetTime, 10) * 1000; // Convert to milliseconds
-              const currentTime = Date.now();
-              const waitTime = resetTimestamp - currentTime + 1000; // Add 1 second buffer
-              
-              if (waitTime > 0) {
-                console.log(`⏳ Rate limited. Waiting until reset: ${new Date(resetTimestamp).toLocaleTimeString()}`);
-                return waitTime;
-              }
-            }
-          }
-          
-          // More aggressive backoff for 403 errors
-          if (error.response && error.response.statusCode === 403) {
-            console.log(`🚫 Got 403 error. Using extended backoff.`);
-            return retryCount * 5000; // 5 second, 10 second, 15 second backoff
-          }
-          
-          // Default to exponential backoff
-          return Math.pow(2, retryCount) * 1000; // 2s, 4s, 8s
-        }
-      }
+    const response = await sendTwitterRequest({
+      method: 'GET',
+      url: fullUrl,
+      tokens
     });
     
-    // Log rate limit information for debugging
-    if (response.headers && response.headers['x-rate-limit-remaining']) {
-      const remaining = response.headers['x-rate-limit-remaining'];
-      const resetTime = new Date(parseInt(response.headers['x-rate-limit-reset'], 10) * 1000);
-      console.log(`📊 Twitter API rate limit: ${remaining} requests remaining`);
-      console.log(`⏰ Rate limit resets at: ${resetTime.toLocaleTimeString()}`);
+    // Process and return the results
+    if (response && response.data) {
+      console.log(`📊 Found ${response.data.length} mentions`);
+      return response.data;
     }
     
-    // Check if we have any mentions
-    if (!response.body || !response.body.data) {
-      if (response.body && response.body.meta && response.body.meta.result_count === 0) {
-        console.log('✅ Request successful but no mentions found.');
-        return [];
-      }
-      
-      console.warn('⚠️ Unexpected response structure:', JSON.stringify(response.body));
-      return [];
-    }
-    
-    console.log(`✅ Successfully fetched ${response.body.data.length} mentions.`);
-    return response.body.data;
-    
+    return [];
   } catch (error) {
     console.error('❌ Error fetching mentions:');
+    console.error(`   HTTP Status: ${error.statusCode || 'Unknown'}`);
+    console.error(`   ${error.message}`);
     
-    if (error.response) {
-      const statusCode = error.response.statusCode;
-      console.error(`   HTTP Status: ${statusCode}`);
-      
-      if (statusCode === 429) {
-        console.error('   Rate limit exceeded. Consider reducing request frequency.');
-        if (error.response.headers && error.response.headers['x-rate-limit-reset']) {
-          const resetTime = parseInt(error.response.headers['x-rate-limit-reset'], 10) * 1000;
-          console.error(`   Rate limit will reset at: ${new Date(resetTime).toLocaleTimeString()}`);
-        }
-      } else if (statusCode === 403) {
-        console.error('   Authentication error (403). Token may be invalid or expired.');
-      } 
-      
-      if (error.response.body) {
-        console.error('   API Error Response:', JSON.stringify(error.response.body, null, 2));
-      }
-    } else {
-      console.error(`   ${error.message}`);
+    if (error.message.includes('401')) {
+      console.error('   Authentication error (401): Your tokens appear to be invalid or expired.');
+      console.error('   ACTION REQUIRED: Please reset tokens and re-authenticate.');
+    } else if (error.message.includes('429')) {
+      console.error('   Rate limit error (429): You\'ve exceeded Twitter API rate limits.');
+      console.error('   ACTION REQUIRED: Wait a few minutes before trying again.');
     }
     
-    console.log('⚠️ Returning empty array due to error');
+    console.error('   API Error Response:', error.twitterError ? 
+      JSON.stringify(error.twitterError, null, 2) : 'No detailed error info');
+    
+    console.warn('⚠️ Returning empty array due to error');
     return [];
+  }
+}
+
+/**
+ * Send a request to the Twitter API with proper OAuth authentication
+ * @param {Object} options - Request options
+ * @returns {Promise<Object>} - Twitter API response
+ */
+async function sendTwitterRequest(options) {
+  const { method, url, tokens, body } = options;
+  
+  const token = {
+    key: tokens.oauth_token,
+    secret: tokens.oauth_token_secret,
+  };
+  
+  const authHeader = oauth.toHeader(
+    oauth.authorize(
+      {
+        url,
+        method,
+      },
+      token
+    )
+  );
+  
+  try {
+    const requestOptions = {
+      headers: {
+        Authorization: authHeader.Authorization,
+        'User-Agent': 'FantasyTopTwitterBot',
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      responseType: 'json',
+    };
+    
+    if (body) {
+      requestOptions.json = body;
+    }
+    
+    console.log(`Sending ${method} request to: ${url}`);
+    const response = method === 'GET' 
+      ? await got.get(url, requestOptions)
+      : await got.post(url, requestOptions);
+    
+    return response.body;
+  } catch (error) {
+    const enhancedError = new Error(error.message);
+    enhancedError.statusCode = error.response?.statusCode;
+    enhancedError.twitterError = error.response?.body;
+    enhancedError.isTwitterError = true;
+    throw enhancedError;
   }
 }
 
